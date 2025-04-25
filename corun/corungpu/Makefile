@@ -1,5 +1,5 @@
 CC = gcc
-ARCH=sm_35
+ARCH=sm_75
 
 main : driver1.cu
 	nvcc -O3 -std=c++11 -ccbin=$(CC)  driver1.cu -arch=$(ARCH) -o main 

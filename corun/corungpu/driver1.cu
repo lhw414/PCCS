@@ -24,8 +24,8 @@
 #define KERNEL2(a,b,c)   ((a) = (a)*(b) + (c))
 #define KERNEL1(a,b,c)   ((a) = (b) + (c))
 void initialize(uint64_t nsize,
-                double* __restrict__ A,
-                double value)
+                float* __restrict__ A,
+                float value)
 {
   uint64_t i;
   for (i = 0; i < nsize; ++i) {
@@ -34,11 +34,11 @@ void initialize(uint64_t nsize,
 }
 void gpuKernel(uint64_t nsize,
                uint64_t ntrials,
-               double* __restrict__ array,
+               float* __restrict__ array,
                int* bytes_per_elem,
                int* mem_accesses_per_elem);
 
-__global__ void block_stride(uint64_t ntrials, uint64_t nsize, double *A)
+__global__ void block_stride(uint64_t ntrials, uint64_t nsize, float *A)
 {
 		uint64_t total_thr = gridDim.x * blockDim.x;
 		uint64_t elem_per_thr = (nsize + (total_thr-1)) / total_thr;
@@ -56,13 +56,13 @@ __global__ void block_stride(uint64_t ntrials, uint64_t nsize, double *A)
 				end_idx = nsize;
 		}
 
-		double alpha = 0.5;
+		float alpha = 0.5;
 		uint64_t i, j;
 		for (j = 0; j < ntrials; ++j) {
 				for (i = start_idx; i < end_idx; i += stride_idx) {
-						double beta = 0.8;
+						float beta = 0.8;
 						/* add 1 flop */
-						KERNEL1(beta,A[i],alpha);
+						// KERNEL1(beta,A[i],alpha);
 						/* add 2 flops */
 						//KERNEL2(beta,A[i],alpha);
 						/* add 4 flops */
@@ -75,7 +75,7 @@ __global__ void block_stride(uint64_t ntrials, uint64_t nsize, double *A)
 						/* add 32 flops */
 						//REP16(KERNEL2(beta,A[i],alpha));
 						/* add 64 flops */
-						//REP32(KERNEL2(beta,A[i],alpha));
+						// REP32(KERNEL2(beta,A[i],alpha));
 						/* add 128 flops */
 						//REP64(KERNEL2(beta,A[i],alpha));
 						/* add 256 flops */
@@ -83,7 +83,7 @@ __global__ void block_stride(uint64_t ntrials, uint64_t nsize, double *A)
 						/* add 512 flops */
 						//REP256(KERNEL2(beta,A[i],alpha));
 						/* add 1024 flops */
-						//REP512(KERNEL2(beta,A[i],alpha));
+						REP512(KERNEL2(beta,A[i],alpha));
 
 						A[i] = beta;
 				}
@@ -96,7 +96,7 @@ int gpu_threads = 512;
 
 void gpuKernel(uint64_t nsize,
                uint64_t ntrials,
-               double* __restrict__ A,
+               float* __restrict__ A,
                int* bytes_per_elem,
                int* mem_accesses_per_elem)
 {
@@ -129,7 +129,7 @@ int main(int argc, char *argv[]) {
 		uint64_t PSIZE = TSIZE / nprocs;
 
 
-		double *              buf = (double *)malloc(PSIZE);
+		float *              buf = (float *)malloc(PSIZE);
 
 		if (buf == NULL) {
 				fprintf(stderr, "Out of memory!\n");
@@ -164,16 +164,16 @@ int main(int argc, char *argv[]) {
     
                 uint64_t nsize = PSIZE / nthreads;
                 nsize = nsize & (~(64-1));
-                nsize = nsize / sizeof(double);
+                nsize = nsize / sizeof(float);
                 uint64_t nid =  nsize * id ;
 
                 // initialize small chunck of buffer within each thread
                 initialize(nsize, &buf[nid], 1.0);
 
 
-				double *d_buf;
-				cudaMalloc((void **)&d_buf, nsize*sizeof(double));
-				cudaMemset(d_buf, 0, nsize*sizeof(double));
+				float *d_buf;
+				cudaMalloc((void **)&d_buf, nsize*sizeof(float));
+				cudaMemset(d_buf, 0, nsize*sizeof(float));
 				cudaDeviceSynchronize();
 
 				double startTime, endTime;
@@ -189,7 +189,7 @@ int main(int argc, char *argv[]) {
 								ntrials = 1;
                         //600 original 
 						for (t = 1; t <= 600; t = t + 1) { // working set - ntrials
-								cudaMemcpy(d_buf, &buf[nid], n*sizeof(double), cudaMemcpyHostToDevice);
+								cudaMemcpy(d_buf, &buf[nid], n*sizeof(float), cudaMemcpyHostToDevice);
 								cudaDeviceSynchronize();
 
 								if ((id == 0) && (rank==0)) {
@@ -216,7 +216,7 @@ int main(int argc, char *argv[]) {
 										printf("BW: %15.3lf\n",total_bytes*1.0/seconds/1024/1024/1024);
 								} // print
 
-								cudaMemcpy(&buf[nid], d_buf, n*sizeof(double), cudaMemcpyDeviceToHost);
+								cudaMemcpy(&buf[nid], d_buf, n*sizeof(float), cudaMemcpyDeviceToHost);
 								cudaDeviceSynchronize();
 						} // working set - ntrials
 
