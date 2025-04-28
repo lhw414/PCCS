@@ -40,7 +40,7 @@ run_and_collect() {          # $1=DIR  $2=EXE  $3=OUTFILE
       case "$line" in
         BW:*) set -- $line; echo "$2" >> "$OUT" ;;  
         *)    set -- $line; [ $# -ge 2 ] || continue
-              [ "$2" -ge 10 ] && kill "$PID" 2>/dev/null ;;
+              [ "$2" -ge 5 ] && kill "$PID" 2>/dev/null ;;
       esac
     done <"$FIFO"
 
@@ -50,32 +50,34 @@ run_and_collect() {          # $1=DIR  $2=EXE  $3=OUTFILE
 }
 
 run_cpu_only() {
-  run_and_collect  "$CPU_ROOT/c$1"  driver1      "$TMP_DIR/cpu.txt"
+  OUT="$TMP_DIR/cpu.txt"
+  :> "$OUT"                       # ← 파일 내용 비우기
+  run_and_collect "$CPU_ROOT/c$1" driver1 "$OUT"
+
   read m v med <<EOF
-$(stats "$TMP_DIR/cpu.txt")
+$(stats "$OUT")
 EOF
   line "CPU$1" "$m" "$v" "$med" "run $1/10"
 }
 
 run_gpu_only() {
-  run_and_collect  "$GPU_ROOT/cl$1" corun_kernel "$TMP_DIR/gpu.txt"
+  OUT="$TMP_DIR/gpu.txt"
+  :> "$OUT"                       # ← 파일 내용 비우기
+  run_and_collect "$GPU_ROOT/cl$1" corun_kernel "$OUT"
+
   read m v med <<EOF
-$(stats "$TMP_DIR/gpu.txt")
+$(stats "$OUT")
 EOF
   line "GPU$1" "$m" "$v" "$med" "run $1/10"
 }
 
-run_pair() {
-  ( cd "$CPU_ROOT/c$1"; while true; do ./driver1 >/dev/null 2>&1; done ) &
-  CPU_PID=$!
-
-  run_and_collect "$GPU_ROOT/cl$1" corun_kernel "$TMP_DIR/pair.txt"
-  kill "$CPU_PID" 2>/dev/null; wait "$CPU_PID" 2>/dev/null || true
-
-  read m v med <<EOF
-$(stats "$TMP_DIR/pair.txt")
-EOF
-  line "PAIR$1" "$m" "$v" "$med" "run $1/10"
+run_pair(){ CPU=$1 GPU=$2
+  OUT="$TMP_DIR/pair_${CPU}_${GPU}.txt"; :>"$OUT"
+  ( cd "$CPU_ROOT/c$CPU"; while true;do ./driver1 >/dev/null 2>&1;done ) & CPID=$!
+  run_and_collect "$GPU_ROOT/cl$GPU" corun_kernel "$OUT"
+  kill "$CPID" 2>/dev/null; wait "$CPID" 2>/dev/null||true
+  read m v md<<<"$(stats "$OUT")"
+  line "P${CPU}-${GPU}" "$m" "$v" "$md" "pair"; 
 }
 
 say "===== ERT BENCH (iter cap 100) ====="
@@ -88,6 +90,8 @@ for i in $(seq 1 10); do
 done
 say "----- independent done -----"
 
-for i in $(seq 1 10); do
-  run_pair "$i"
+for cpu in $(seq 1 10); do
+  for gpu in $(seq 1 10); do
+    run_pair "$cpu" "$gpu"
+  done
 done
