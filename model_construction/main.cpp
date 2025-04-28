@@ -4,7 +4,7 @@
 #include <vector>
 #include <algorithm>
 
-#define threshold_minor 90
+#define threshold_minor 80
 #define eps 1e-8
 
 using namespace std;

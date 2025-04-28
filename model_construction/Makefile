@@ -1,7 +1,16 @@
-CC = gcc
+CXX     := g++
+CXXFLAGS := -std=c++17 -O2 -Wall
+LDFLAGS := 
 
-main : main.c
-	gcc -fopenmp main.c -o main
+TARGET  := main
+SRC     := main.cpp
 
-clean :
-	rm -f main
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+clean:
+	@rm -f $(TARGET)

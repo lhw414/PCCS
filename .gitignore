@@ -4,3 +4,8 @@
 *.o.d
 *.so
 corun_kernel
+
+libs/
+obj/
+
+main

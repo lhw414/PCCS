@@ -1,166 +1,152 @@
-#include <CL/cl.h>
-#include <cstdio>
-#include <cstdlib>
-#include <vector>
-#include <inttypes.h>
+/* ──────────── host.cpp ────────────
+ *  OpenCL host program replicating the CUDA ERT-style benchmark
+ *  Build:  g++ host.cpp -lOpenCL -o corun_host
+ ******************************************** */
 
-#define CHECK_ERR(err, msg) \
-    if ((err) != CL_SUCCESS) { \
-        fprintf(stderr, "%s failed (err=%d)\n", msg, err); \
-        std::exit(EXIT_FAILURE); \
-    }
-
-#define ERT_FLOP  (2)
-#define GBUNIT    (1024.0 * 1024.0 * 1024.0)
-
-static char* loadSource(const char* filename, size_t* outSize) {
-    FILE* fp = std::fopen(filename, "rb");
-    if (!fp) { perror("fopen"); std::exit(EXIT_FAILURE); }
-    std::fseek(fp, 0, SEEK_END);
-    size_t size = ftell(fp);
-    rewind(fp);
-    char* src = (char*)std::malloc(size + 1);
-    fread(src, 1, size, fp);
-    src[size] = '\0';
-    fclose(fp);
-    *outSize = size;
-    return src;
-}
-
-int main(int argc, char** argv) {
-    // 인자: nsize, ntrials, threads, blocks
-    const size_t default_elements = (1ULL<<30) / sizeof(float);  // 1GiB buffer
-    const size_t nsize   = (argc > 1 ? std::atoi(argv[1]) : default_elements);
-    const size_t ntrials = (argc > 2 ? std::atoi(argv[2]) : 600);
-    const size_t threads = (argc > 3 ? std::atoi(argv[3]) : 512);
-    const size_t blocks  = (argc > 4 ? std::atoi(argv[4]) : 512);
-
-    cl_int err;
-    // 플랫폼 탐색
-    cl_uint numPlat = 0;
-    CHECK_ERR(clGetPlatformIDs(0, nullptr, &numPlat), "clGetPlatformIDs");
-    std::vector<cl_platform_id> plats(numPlat);
-    CHECK_ERR(clGetPlatformIDs(numPlat, plats.data(), nullptr), "clGetPlatformIDs");
-
-    // 첫 GPU 디바이스 선택
-    cl_device_id device = nullptr;
-    for (auto &plat : plats) {
-        cl_uint numDev = 0;
-        if (clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, 0, nullptr, &numDev) == CL_SUCCESS 
-            && numDev > 0) {
-            std::vector<cl_device_id> devs(numDev);
-            clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, numDev, devs.data(), nullptr);
-            device = devs[0];
-            break;
-        }
-    }
-    if (!device) {
-        fprintf(stderr, "No GPU device found\n");
-        return 1;
-    }
-
-    // 컨텍스트, 큐 생성 (프로파일링 활성화)
-    cl_context context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
-    CHECK_ERR(err, "clCreateContext");
-    cl_command_queue queue = clCreateCommandQueue(
-        context, device, CL_QUEUE_PROFILING_ENABLE, &err);
-    CHECK_ERR(err, "clCreateCommandQueue");
-
-    // 커널 소스 로드 & 빌드
-    size_t srcSize;
-    char* srcStr = loadSource("corun_kernel.cl", &srcSize);
-    cl_program program = clCreateProgramWithSource(
-        context, 1, (const char**)&srcStr, &srcSize, &err);
-    CHECK_ERR(err, "clCreateProgramWithSource");
-
-    err = clBuildProgram(program, 1, &device, nullptr, nullptr, nullptr);
-    if (err != CL_SUCCESS) {
-        size_t logSize;
-        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG,
-                              0, nullptr, &logSize);
-        std::vector<char> log(logSize);
-        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG,
-                              logSize, log.data(), nullptr);
-        fprintf(stderr, "Build log:\n%s\n", log.data());
-        CHECK_ERR(err, "clBuildProgram");
-    }
-    std::free(srcStr);
-
-    cl_kernel kernel = clCreateKernel(program, "block_stride", &err);
-    CHECK_ERR(err, "clCreateKernel");
-
-    // 버퍼 생성
-    size_t bufBytes = nsize * sizeof(float);
-    cl_mem bufA = clCreateBuffer(
-        context, CL_MEM_READ_WRITE, bufBytes, nullptr, &err);
-    CHECK_ERR(err, "clCreateBuffer A");
-    cl_mem bufBPE = clCreateBuffer(
-        context, CL_MEM_WRITE_ONLY, sizeof(int), nullptr, &err);
-    CHECK_ERR(err, "clCreateBuffer BPE");
-    cl_mem bufMPE = clCreateBuffer(
-        context, CL_MEM_WRITE_ONLY, sizeof(int), nullptr, &err);
-    CHECK_ERR(err, "clCreateBuffer MPE");
-
-    // 호스트 버퍼 초기화
-    std::vector<float> hostA(nsize, 0.5f);
-    CHECK_ERR(clEnqueueWriteBuffer(queue, bufA, CL_TRUE, 0,
-                                   bufBytes, hostA.data(),
-                                   0, nullptr, nullptr),
-              "clEnqueueWriteBuffer");
-
-    // 커널 인자
-    CHECK_ERR(clSetKernelArg(kernel, 0, sizeof(bufA),    &bufA),    "clSetKernelArg 0");
-    CHECK_ERR(clSetKernelArg(kernel, 1, sizeof(ntrials), &ntrials),"clSetKernelArg 1");
-    CHECK_ERR(clSetKernelArg(kernel, 2, sizeof(nsize),   &nsize),  "clSetKernelArg 2");
-    CHECK_ERR(clSetKernelArg(kernel, 3, sizeof(bufBPE),  &bufBPE),  "clSetKernelArg 3");
-    CHECK_ERR(clSetKernelArg(kernel, 4, sizeof(bufMPE),  &bufMPE),  "clSetKernelArg 4");
-
-    // NDRange 실행
-    size_t global = threads * blocks;
-    size_t local  = threads;
-    cl_event prof;
-    CHECK_ERR(clEnqueueNDRangeKernel(queue, kernel, 1, nullptr,
-                                     &global, &local,
-                                     0, nullptr, &prof),
-              "clEnqueueNDRangeKernel");
-    CHECK_ERR(clWaitForEvents(1, &prof), "clWaitForEvents");
-
-    // 프로파일링 타임스탬프
-    cl_ulong t0 = 0, t1 = 0;
-    clGetEventProfilingInfo(prof, CL_PROFILING_COMMAND_START,
-                            sizeof(t0), &t0, nullptr);
-    clGetEventProfilingInfo(prof, CL_PROFILING_COMMAND_END,
-                            sizeof(t1), &t1, nullptr);
-    double sec = double(t1 - t0) * 1e-9;
-
-    // 메트릭 읽기
-    int bpe = 0, mpe = 0;
-    CHECK_ERR(clEnqueueReadBuffer(queue, bufBPE, CL_TRUE, 0, sizeof(int),
-                                  &bpe, 0, nullptr, nullptr),
-              "clEnqueueReadBuffer BPE");
-    CHECK_ERR(clEnqueueReadBuffer(queue, bufMPE, CL_TRUE, 0, sizeof(int),
-                                  &mpe, 0, nullptr, nullptr),
-              "clEnqueueReadBuffer MPE");
-
-    // BW & FLOPS 계산
-    uint64_t total_bytes = uint64_t(ntrials) * uint64_t(nsize) * bpe * mpe;
-    uint64_t total_flops = uint64_t(ntrials) * uint64_t(nsize) * ERT_FLOP;
-    double bw = double(total_bytes) / sec / GBUNIT;
-    double gflops = double(total_flops) / sec / 1e9;
-
-    printf("Bytes moved : %" PRIu64 "\n", total_bytes);
-    printf("Bandwidth   : %.3f GB/s\n", bw);
-    printf("Flops done  : %" PRIu64 "\n", total_flops);
-    printf("GFLOPS      : %.3f\n", gflops);
-
-    // 정리
-    clReleaseEvent(prof);
-    clReleaseMemObject(bufA);
-    clReleaseMemObject(bufBPE);
-    clReleaseMemObject(bufMPE);
-    clReleaseKernel(kernel);
-    clReleaseProgram(program);
-    clReleaseCommandQueue(queue);
-    clReleaseContext(context);
-    return 0;
-}
+ #include <CL/cl.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <stdint.h>
+ #include <sys/time.h>
+ #include <inttypes.h>
+ 
+ #define ERT_FLOP 2
+ #define GBUNIT   (1024 * 1024 * 1024)
+ 
+ /*         kernel launch geometry (CUDA → OpenCL)              */
+ static const int GPU_BLOCKS  = 512;
+ static const int GPU_THREADS = 512;
+ 
+ /* host-side helpers */
+ static double getTime()
+ {
+     struct timeval tv;
+     gettimeofday(&tv, nullptr);
+     return tv.tv_sec + tv.tv_usec / 1e6;
+ }
+ 
+ static void initialize(uint64_t n, float *A, float val)
+ {
+     for (uint64_t i = 0; i < n; ++i) A[i] = val;
+ }
+ 
+ /* very small error-checking wrapper */
+ #define CLCHK(err, msg)                                   \
+     if (err != CL_SUCCESS) {                              \
+         fprintf(stderr, "%s (%d)\n", msg, err); exit(-1); \
+     }
+ 
+ int main()
+ {
+     const uint64_t TSIZE = 1ULL << 28;        /* 256 MiB */
+     const int      nprocs = 1, nthreads = 1;
+     const uint64_t PSIZE  = TSIZE / nprocs;
+ 
+     float *buf = (float*) malloc(PSIZE);
+     if (!buf) { fprintf(stderr,"OOM\n"); return -1; }
+ 
+     cl_int  err;
+     cl_uint num_plat;
+     cl_platform_id platform;
+     CLCHK(clGetPlatformIDs(1, &platform, &num_plat), "clGetPlatformIDs");
+ 
+     cl_uint num_dev;
+     cl_device_id device;
+     CLCHK(clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, &num_dev),
+           "clGetDeviceIDs");
+ 
+     cl_context ctx = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
+     CLCHK(err, "clCreateContext");
+ 
+     cl_command_queue q =
+         clCreateCommandQueueWithProperties(ctx, device, 0, &err);
+     CLCHK(err, "clCreateCommandQueue");
+ 
+     FILE *fp = fopen("corun_kernel.cl", "rb");
+     fseek(fp, 0, SEEK_END);
+     long fsz = ftell(fp);
+     rewind(fp);
+     char *src = (char*) malloc(fsz + 1);
+     fread(src, 1, fsz, fp); src[fsz] = '\0'; fclose(fp);
+ 
+     const char *sources[] = { src };
+     cl_program prog = clCreateProgramWithSource(ctx, 1, sources, nullptr, &err);
+     CLCHK(err, "clCreateProgramWithSource");
+     err = clBuildProgram(prog, 1, &device, "-cl-std=CL2.0", nullptr, nullptr);
+     if (err != CL_SUCCESS) {
+         size_t logsz; clGetProgramBuildInfo(prog, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &logsz);
+         char *log = (char*) malloc(logsz);
+         clGetProgramBuildInfo(prog, device, CL_PROGRAM_BUILD_LOG, logsz, log, nullptr);
+         fprintf(stderr, "%s\n", log); free(log);
+         exit(-1);
+     }
+     cl_kernel krnl = clCreateKernel(prog, "block_stride", &err);
+     CLCHK(err, "clCreateKernel");
+     free(src);
+ 
+     uint64_t nsize = PSIZE / sizeof(float);
+     nsize &= ~(uint64_t)(64 - 1);   /* 64-byte align */
+     initialize(nsize, buf, 1.0f);
+ 
+     cl_mem d_buf = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+                                   nsize * sizeof(float), nullptr, &err);
+     CLCHK(err, "clCreateBuffer");
+ 
+     uint64_t n = 1ULL << 25;
+     while (n <= nsize) {
+         uint64_t max_trials = 600;
+         for (uint64_t t = 1; t <= max_trials; ++t) {
+             CLCHK(clEnqueueWriteBuffer(q, d_buf, CL_TRUE,
+                                        0, n * sizeof(float), buf, 0, nullptr, nullptr),
+                   "clEnqueueWriteBuffer");
+ 
+             uint64_t ntrials = t;
+             CLCHK(clSetKernelArg(krnl, 0, sizeof(cl_ulong), &ntrials), "arg0");
+             CLCHK(clSetKernelArg(krnl, 1, sizeof(cl_ulong), &n),      "arg1");
+             CLCHK(clSetKernelArg(krnl, 2, sizeof(cl_mem),   &d_buf),   "arg2");
+ 
+             size_t local_size  = GPU_THREADS;
+             size_t global_size = (size_t)GPU_BLOCKS * GPU_THREADS;
+ 
+             double t0 = getTime();
+             CLCHK(clEnqueueNDRangeKernel(q, krnl, 1,
+                          nullptr, &global_size, &local_size, 0, nullptr, nullptr),
+                   "clEnqueueNDRangeKernel");
+             CLCHK(clFinish(q), "clFinish");
+             double t1 = getTime();
+ 
+             uint64_t working_set_size = n;        
+             uint64_t bytes_per_elem   = sizeof(float);
+             uint64_t total_bytes = t * working_set_size * bytes_per_elem * 2; 
+             uint64_t total_flops = t * working_set_size * ERT_FLOP;
+ 
+             printf("%12" PRIu64 " %12" PRIu64 " %15.3lf %12" PRIu64 " %12" PRIu64 "\n",
+                    working_set_size * bytes_per_elem,
+                    t,
+                    (t1 - t0) * 1e6,
+                    total_bytes,
+                    total_flops);
+             printf("BW: %15.3lf GiB/s\n",
+                    total_bytes / (t1 - t0) / GBUNIT);
+ 
+             CLCHK(clEnqueueReadBuffer(q, d_buf, CL_TRUE,
+                                       0, n * sizeof(float), buf, 0, nullptr, nullptr),
+                   "clEnqueueReadBuffer");
+         }
+         break;  
+     }
+ 
+     clReleaseMemObject(d_buf);
+     clReleaseKernel(krnl);
+     clReleaseProgram(prog);
+     clReleaseCommandQueue(q);
+     clReleaseContext(ctx);
+     free(buf);
+ 
+     puts("\nMETA_DATA");
+     printf("FLOPS          %d\n", ERT_FLOP);
+     printf("GPU_BLOCKS     %d\n", GPU_BLOCKS);
+     printf("GPU_THREADS    %d\n", GPU_THREADS);
+     return 0;
+ }
+ 
