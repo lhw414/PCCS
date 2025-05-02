@@ -54,7 +54,7 @@ int main(void)
     uint64_t total_bytes = NTRIALS * TOTAL_BYTES * 2;
     double bw = total_bytes / (t1 - t0) / (1024.0*1024.0*1024.0);
 
-    FARF(ALWAYS, "BW result: %.2f GiB/s  (256 MiB × %llu trials, R+W)",
+    FARF(ALWAYS, "BW result: %.2f GiB/s  (256 MiB x %llu trials, R+W)",
          bw, (unsigned long long)NTRIALS);
 
     free(A);
