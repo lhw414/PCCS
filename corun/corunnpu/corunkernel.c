@@ -1,78 +1,66 @@
+// Build command : hexagon-clang -mv68 -O2 -G0 -shared -fPIC -mhvx -mhvx-length=128B -I$HEXAGON_SDK_ROOT/tools/idl -I$HEXAGON_SDK_ROOT/incs -I$HEXAGON_SDK_ROOT/incs/stddef corunkernel.c -o corunkernel.so
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <sys/time.h>
-#include <inttypes.h>
-#include <math.h>
+#include <string.h>
+#include "hexagon_types.h"
+#include "hvx_hexagon_protos.h"
+#include "HAP_perf.h"      
+#include "HAP_farf.h"
 
-// HVX 128-byte wide vector of float
-typedef float vfloat32 __attribute__((vector_size(128)));
+#define REP2(S)   S; S
+#define REP4(S)   REP2(S); REP2(S)
+#define REP8(S)   REP4(S); REP4(S)
+#define REP16(S)  REP8(S); REP8(S)
+#define REP32(S)  REP16(S); REP16(S)
+#define REP64(S)  REP32(S); REP32(S)
+#define REP128(S) REP64(S); REP64(S)
+#define REP256(S) REP128(S); REP128(S)
 
-#define REP2(S)    S; S
-#define REP4(S)    REP2(S); REP2(S)
-#define REP8(S)    REP4(S); REP4(S)
-#define REP16(S)   REP8(S); REP8(S)
-#define REP32(S)   REP16(S); REP16(S)
-#define REP64(S)   REP32(S); REP32(S)
-#define REP128(S)  REP64(S); REP64(S)
-#define REP256(S)  REP128(S); REP128(S)
-#define REP512(S)  REP256(S); REP256(S)
-
-static inline double now_s() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec + tv.tv_usec*1e-6;
+static inline HVX_Vector hvx_add_vec(HVX_Vector a, HVX_Vector b)
+{
+    return Q6_Vh_vadd_VhVh(a, b);
 }
 
-void hvx_bench(float *A, uint64_t nsize, uint64_t ntrials) {
-    const int bytes_per_elem = sizeof(float);
-    const int mem_accesses_per_elem = 2;
-    const uint64_t vec_elems = 128 / sizeof(float); // 32
-    uint64_t chunks = (nsize + vec_elems-1) / vec_elems;
+static void hvx_mem_bw(uint8_t* buf, uint64_t nbytes, uint64_t ntrials)
+{
+    const uint64_t VEC_BYTES = 128;
+    HVX_Vector alpha = Q6_V_vsplat_R(0x11);
 
     for (uint64_t t = 0; t < ntrials; ++t) {
-        // alpha 갱신 (scalar)
-        float alpha = 0.5f * powf(1.0f - 1e-8f, (float)t);
-        // vector broadcast
-        vfloat32 alpha_vec = { [0 ... 31] = alpha };
-
-        for (uint64_t v = 0; v < chunks; ++v) {
-            size_t base = v * vec_elems;
-            if (base + vec_elems > nsize) break;
-
-            // 로드
-            vfloat32 va = *(vfloat32*)&A[base];
-
-            // 1 flop 예시: a = b + c
-            //va = va + alpha_vec;
-
-            // 2 flop 예시: a = a*b + c
-            //va = va * alpha_vec + alpha_vec;
-
-            // 256 flop 예시:
-            REP256( va = va * alpha_vec + alpha_vec; )
-
-            // 저장
-            *(vfloat32*)&A[base] = va;
+        for (uint64_t base = 0; base < nbytes; base += VEC_BYTES) {
+            HVX_Vector* vp = (HVX_Vector*)(buf + base);
+            HVX_Vector v   = *vp;
+            v = hvx_add_vec(v, alpha);  
+            *vp = v;
         }
     }
 }
 
-int main(){
-    const uint64_t TSIZE = (1ULL<<28);        // bytes
-    const uint64_t nsize = TSIZE / sizeof(float);
-    float *A;
-    posix_memalign((void**)&A, 128, TSIZE);
-    for (uint64_t i = 0; i < nsize; ++i) A[i] = 1.0f;
+int main(void)
+{
+    const uint64_t TOTAL_BYTES = 1ULL << 28;      
+    const uint64_t NTRIALS     = 600;
 
-    uint64_t ntrials = /* OpenCL/CUDA 쪽과 동일하게 계산 */;
-    double st = now_s();
-    hvx_bench(A, nsize, ntrials);
-    double en = now_s();
+    uint8_t* A;
+    posix_memalign((void**)&A, 128, TOTAL_BYTES);
+    memset(A, 1, TOTAL_BYTES);
 
-    double secs = en - st;
-    uint64_t total_bytes = ntrials * nsize * sizeof(float) * 2;
-    double bw = total_bytes / secs / (1024.0*1024.0*1024.0);
-    printf("BW = %.3f GB/s\n", bw);
+    double t0 = HAP_perf_get_time_us() * 1e-6;    
+    hvx_mem_bw(A, TOTAL_BYTES, NTRIALS);
+    double t1 = HAP_perf_get_time_us() * 1e-6;
+
+    uint64_t total_bytes = NTRIALS * TOTAL_BYTES * 2;
+    double bw = total_bytes / (t1 - t0) / (1024.0*1024.0*1024.0);
+
+    FARF(ALWAYS, "First 16 bytes: %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+         A[0],A[1],A[2],A[3],A[4],A[5],A[6],A[7],
+         A[8],A[9],A[10],A[11],A[12],A[13],A[14],A[15]);
+
+    FARF(ALWAYS, "BW result: %.2f GiB/s  (256 MiB × %llu trials, R+W)",
+         bw, (unsigned long long)NTRIALS);
+
+    free(A);
     return 0;
 }

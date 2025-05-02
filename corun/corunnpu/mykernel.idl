@@ -1,5 +1,0 @@
-import "stdint.idl";
-
-interface mykernel {
-  void hvx_add([in] uint8 a[128], [in] uint8 b[128], [out] uint8 c[128]);
-};
