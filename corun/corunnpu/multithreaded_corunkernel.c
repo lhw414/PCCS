@@ -1,11 +1,10 @@
 // Build command:
 // hexagon-clang -mv68 -O2 -G0 -shared -fPIC -mhvx -mhvx-length=128B \
-//   -I$HEXAGON_SDK_ROOT/tools/idl -I$HEXAGON_SDK_ROOT/incs
+//   -I$HEXAGON_SDK_ROOT/tools/idl -I$HEXAGON_SDK_ROOT/incs \
 //   -I$HEXAGON_SDK_ROOT/incs/stddef \
-//   -I$HEXAGON_SDK_ROOT/libs/common/qurt/ADSPv68MP/include \
-//   -L$HEXAGON_SDK_ROOT/libs/common/qurt/ADSPv68MP/lib \
-//   multithreaded_corunkernel.c -o multithreaded_corunkernel.so -lqurt
-//   -lpthread
+//   -I$HEXAGON_SDK_ROOT/target/qurt-system/inc \
+//   -I$HEXAGON_SDK_ROOT/rtos/qurt/computev68/include/qurt \
+//   multithreaded_corunkernel.c -o multithreaded_corunkernel.so \
 
 #include <stdint.h>
 #include <stdio.h>
@@ -17,7 +16,6 @@
 #include "hexagon_types.h"
 #include "hvx_hexagon_protos.h"
 #include "qurt_barrier.h"
-#include "qurt_cycles.h"
 #include "qurt_hvx.h"
 #include "qurt_thread.h"
 
@@ -147,10 +145,8 @@ int main(void) {
   uint64_t remaining_bytes = TOTAL_BYTES % num_threads_to_use;
 
   double t0, t1;
-  unsigned long long start_cycles, end_cycles;
 
   FARF(HIGH, "Creating %d worker threads...", num_threads_to_use);
-  start_cycles = qurt_cycles_get();
   t0 = HAP_perf_get_time_us() * 1e-6;
 
   for (int i = 0; i < num_threads_to_use; ++i) {
@@ -201,7 +197,6 @@ int main(void) {
   }
 
   t1 = HAP_perf_get_time_us() * 1e-6;
-  end_cycles = qurt_cycles_get();
 
   if (!all_threads_succeeded) {
     FARF(ERROR,
@@ -213,7 +208,6 @@ int main(void) {
 
   uint64_t total_data_processed = NTRIALS * TOTAL_BYTES * 2;
   double elapsed_time_sec = t1 - t0;
-  unsigned long long elapsed_cycles = end_cycles - start_cycles;
   double bw_gib_s = 0;
 
   if (elapsed_time_sec > 0) {
@@ -230,7 +224,6 @@ int main(void) {
   FARF(ALWAYS, "Total Data Processed (R+W): %.2f GiB",
        total_data_processed / (1024.0 * 1024.0 * 1024.0));
   FARF(ALWAYS, "Elapsed Time: %.4f seconds", elapsed_time_sec);
-  FARF(ALWAYS, "Elapsed Cycles: %llu cycles", elapsed_cycles);
   FARF(ALWAYS, "Achieved Bandwidth: %.2f GiB/s", bw_gib_s);
   FARF(ALWAYS, "-----------------------------------------------------");
 
